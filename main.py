@@ -1,5 +1,8 @@
 import argparse
 import os
+import json
+import time
+from pathlib import Path
 import sys
 from typing import List, Optional
 
@@ -64,6 +67,14 @@ def run_gesture_stream(
     width: Optional[int],
     height: Optional[int],
     max_frames: Optional[int],
+    draw_overlays: bool,
+    record_path: Optional[str],
+    record_fps: Optional[float],
+    snapshot_dir: Optional[str],
+    snapshot_interval: Optional[int],
+    json_path: Optional[str],
+    json_landmarks: bool,
+    quiet: bool,
 ) -> int:
     try:
         import cv2  # type: ignore
@@ -118,6 +129,28 @@ def run_gesture_stream(
 
     display_ok = display and is_display_available()
 
+    # Recording setup (lazy-init after first frame)
+    writer = None
+    target_writer_fps: float | None = record_fps
+    record_enabled = bool(record_path)
+    record_path_obj: Path | None = Path(record_path) if record_path else None
+    fourcc_code = None
+
+    # Snapshot setup
+    snapshot_enabled = bool(snapshot_dir)
+    snapshot_dir_path: Path | None = Path(snapshot_dir) if snapshot_dir else None
+    if snapshot_dir_path:
+        snapshot_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # JSON lines setup
+    json_enabled = bool(json_path)
+    json_fp = None
+    if json_enabled:
+        if json_path == "-":
+            json_fp = sys.stdout
+        else:
+            json_fp = open(json_path, "w", encoding="utf-8")
+
     frame_counter = 0
 
     if mode == "hands":
@@ -136,20 +169,64 @@ def run_gesture_stream(
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = hands.process(rgb)
 
+                # Prepare output info
                 num_hands = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
-                print(f"hands: {num_hands}")
+                if not quiet:
+                    print(f"hands: {num_hands}")
 
-                draw_hands(frame, results)
+                # Drawing
+                frame_to_show = frame
+                if draw_overlays:
+                    draw_hands(frame_to_show, results)
 
+                # JSON
+                if json_enabled:
+                    payload = {
+                        "frame_index": frame_counter,
+                        "timestamp_ms": int(time.time() * 1000),
+                        "mode": "hands",
+                        "hands": {
+                            "count": num_hands,
+                        },
+                    }
+                    if json_landmarks and results.multi_hand_landmarks:
+                        lm = []
+                        for hand in results.multi_hand_landmarks:
+                            lm.append([[p.x, p.y, getattr(p, "z", 0.0)] for p in hand.landmark])
+                        payload["hands"]["landmarks"] = lm
+                    json_fp.write(json.dumps(payload) 
+                     "\n")
+                    if json_fp is not sys.stdout:
+                        json_fp.flush()
+
+                # Display
                 if display_ok:
                     try:
-                        cv2.imshow("Gesture - Hands", frame)
+                        cv2.imshow("Gesture - Hands", frame_to_show)
                         if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                             break
                     except Exception:
                         display_ok = False
 
-                frame_counter = 1
+                # Record
+                if record_enabled:
+                    if writer is None:
+                        h, w = frame_to_show.shape[:2]
+                        if target_writer_fps is None or target_writer_fps <= 0:
+                            cap_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                            target_writer_fps = cap_fps if cap_fps and cap_fps > 0 else 30.0
+                        fourcc_code = cv2.VideoWriter_fourcc(*("mp4v" if str(record_path_obj).lower().endswith(".mp4") else "XVID"))
+                        writer = cv2.VideoWriter(str(record_path_obj), fourcc_code, float(target_writer_fps), (w, h))
+                    writer.write(frame_to_show)
+
+                # Snapshots
+                if snapshot_enabled and snapshot_interval and snapshot_interval > 0:
+                    if frame_counter % snapshot_interval == 0:
+                        assert snapshot_dir_path is not None
+                        out_path = snapshot_dir_path / f"frame_{frame_counter:06d}.jpg"
+                        cv2.imwrite(str(out_path), frame_to_show)
+
+                frame_counter += 1
                 if max_frames is not None and frame_counter >= max_frames:
                     break
 
@@ -171,19 +248,54 @@ def run_gesture_stream(
                 results = pose.process(rgb)
 
                 has_pose = bool(results.pose_landmarks)
-                print(f"pose: {int(has_pose)}")
+                if not quiet:
+                    print(f"pose: {int(has_pose)}")
 
-                draw_pose(frame, results)
+                # Drawing
+                frame_to_show = frame
+                if draw_overlays:
+                    draw_pose(frame_to_show, results)
 
+                # JSON
+                if json_enabled:
+                    payload = {
+                        "frame_index": frame_counter,
+                        "timestamp_ms": int(time.time() * 1000),
+                        "mode": "pose",
+                        "pose": {"present": int(has_pose)},
+                    }
+                    json_fp.write(json.dumps(payload) + "\n")
+                    if json_fp is not sys.stdout:
+                        json_fp.flush()
+
+                # Display
                 if display_ok:
                     try:
-                        cv2.imshow("Gesture - Pose", frame)
+                        cv2.imshow("Gesture - Pose", frame_to_show)
                         if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                             break
                     except Exception:
                         display_ok = False
 
-                frame_counter = 1
+                # Record
+                if record_enabled:
+                    if writer is None:
+                        h, w = frame_to_show.shape[:2]
+                        if target_writer_fps is None or target_writer_fps <= 0:
+                            cap_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                            target_writer_fps = cap_fps if cap_fps and cap_fps > 0 else 30.0
+                        fourcc_code = cv2.VideoWriter_fourcc(*("mp4v" if str(record_path_obj).lower().endswith(".mp4") else "XVID"))
+                        writer = cv2.VideoWriter(str(record_path_obj), fourcc_code, float(target_writer_fps), (w, h))
+                    writer.write(frame_to_show)
+
+                # Snapshots
+                if snapshot_enabled and snapshot_interval and snapshot_interval > 0:
+                    if frame_counter % snapshot_interval == 0:
+                        assert snapshot_dir_path is not None
+                        out_path = snapshot_dir_path / f"frame_{frame_counter:06d}.jpg"
+                        cv2.imwrite(str(out_path), frame_to_show)
+
+                frame_counter += 1
                 if max_frames is not None and frame_counter >= max_frames:
                     break
 
@@ -207,21 +319,66 @@ def run_gesture_stream(
                 left = 1 if results.left_hand_landmarks else 0
                 right = 1 if results.right_hand_landmarks else 0
                 pose_found = 1 if results.pose_landmarks else 0
-                print(f"holistic: hands_left={left} hands_right={right} pose={pose_found}")
+                if not quiet:
+                    print(f"holistic: hands_left={left} hands_right={right} pose={pose_found}")
 
-                draw_hands(frame, type("R", (), {"multi_hand_landmarks": results.left_hand_landmarks and [results.left_hand_landmarks] or []}))
-                draw_hands(frame, type("R", (), {"multi_hand_landmarks": results.right_hand_landmarks and [results.right_hand_landmarks] or []}))
-                draw_pose(frame, results)
+                # Drawing
+                frame_to_show = frame
+                if draw_overlays:
+                    draw_hands(frame_to_show, type("R", (), {"multi_hand_landmarks": results.left_hand_landmarks and [results.left_hand_landmarks] or []}))
+                    draw_hands(frame_to_show, type("R", (), {"multi_hand_landmarks": results.right_hand_landmarks and [results.right_hand_landmarks] or []}))
+                    draw_pose(frame_to_show, results)
 
+                # JSON
+                if json_enabled:
+                    payload = {
+                        "frame_index": frame_counter,
+                        "timestamp_ms": int(time.time() * 1000),
+                        "mode": "holistic",
+                        "hands": {"left": left, "right": right},
+                        "pose": {"present": pose_found},
+                    }
+                    if json_landmarks:
+                        if results.left_hand_landmarks:
+                            payload.setdefault("hands", {})["left_landmarks"] = [
+                                [p.x, p.y, getattr(p, "z", 0.0)] for p in results.left_hand_landmarks.landmark
+                            ]
+                        if results.right_hand_landmarks:
+                            payload.setdefault("hands", {})["right_landmarks"] = [
+                                [p.x, p.y, getattr(p, "z", 0.0)] for p in results.right_hand_landmarks.landmark
+                            ]
+                    json_fp.write(json.dumps(payload) + "\n")
+                    if json_fp is not sys.stdout:
+                        json_fp.flush()
+
+                # Display
                 if display_ok:
                     try:
-                        cv2.imshow("Gesture - Holistic", frame)
+                        cv2.imshow("Gesture - Holistic", frame_to_show)
                         if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                             break
                     except Exception:
                         display_ok = False
 
-                frame_counter = 1
+                # Record
+                if record_enabled:
+                    if writer is None:
+                        h, w = frame_to_show.shape[:2]
+                        if target_writer_fps is None or target_writer_fps <= 0:
+                            cap_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                            target_writer_fps = cap_fps if cap_fps and cap_fps > 0 else 30.0
+                        fourcc_code = cv2.VideoWriter_fourcc(*("mp4v" if str(record_path_obj).lower().endswith(".mp4") else "XVID"))
+                        writer = cv2.VideoWriter(str(record_path_obj), fourcc_code, float(target_writer_fps), (w, h))
+                    writer.write(frame_to_show)
+
+                # Snapshots
+                if snapshot_enabled and snapshot_interval and snapshot_interval > 0:
+                    if frame_counter % snapshot_interval == 0:
+                        assert snapshot_dir_path is not None
+                        out_path = snapshot_dir_path / f"frame_{frame_counter:06d}.jpg"
+                        cv2.imwrite(str(out_path), frame_to_show)
+
+                frame_counter += 1
                 if max_frames is not None and frame_counter >= max_frames:
                     break
     else:
@@ -236,6 +393,16 @@ def run_gesture_stream(
             cv2.destroyAllWindows()
     except Exception:
         pass
+    if writer is not None:
+        try:
+            writer.release()
+        except Exception:
+            pass
+    if json_enabled and json_fp is not None and json_fp is not sys.stdout:
+        try:
+            json_fp.close()
+        except Exception:
+            pass
     return 0
 
 
@@ -272,6 +439,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--width", type=int, help="Requested capture width in pixels")
     run_p.add_argument("--height", type=int, help="Requested capture height in pixels")
     run_p.add_argument("--max-frames", type=int, help="Stop after this many frames (for testing)")
+    run_p.add_argument("--no-draw", action="store_true", help="Disable drawing overlays on frames")
+    run_p.add_argument("--record", help="Path to output video file (.mp4 or .avi)")
+    run_p.add_argument("--record-fps", type=float, help="Override output video FPS")
+    run_p.add_argument("--snapshot-dir", help="Directory to save snapshot images")
+    run_p.add_argument("--snapshot-interval", type=int, help="Save a snapshot every N frames")
+    run_p.add_argument("--json", dest="json_path", help="Write JSON Lines to path, or '-' for stdout")
+    run_p.add_argument("--json-landmarks", action="store_true", help="Include hand landmarks in JSON output")
+    run_p.add_argument("--quiet", action="store_true", help="Suppress per-frame prints")
 
     return parser
 
@@ -314,6 +489,14 @@ def main(argv: list[str] | None = None) -> int:
             width=args.width,
             height=args.height,
             max_frames=args.max_frames,
+            draw_overlays=not args.no_draw,
+            record_path=args.record,
+            record_fps=args.record_fps,
+            snapshot_dir=args.snapshot_dir,
+            snapshot_interval=args.snapshot_interval,
+            json_path=args.json_path,
+            json_landmarks=args.json_landmarks,
+            quiet=args.quiet,
         )
 
     parser.print_help()
