@@ -194,8 +194,7 @@ def run_gesture_stream(
                         for hand in results.multi_hand_landmarks:
                             lm.append([[p.x, p.y, getattr(p, "z", 0.0)] for p in hand.landmark])
                         payload["hands"]["landmarks"] = lm
-                    json_fp.write(json.dumps(payload) 
-                     "\n")
+                    json_fp.write(json.dumps(payload) + "\n")
                     if json_fp is not sys.stdout:
                         json_fp.flush()
 
