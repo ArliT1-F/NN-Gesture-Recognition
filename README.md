@@ -36,6 +36,18 @@ python3 main.py run --source 0 --mode hands --display --mirror
 python3 main.py run --source ./sample.mp4 --mode pose --max-frames 300
 ```
 
+### Advanced run options
+```bash
+# Record processed video to output.mp4 at 30 FPS
+python3 main.py run --source 0 --mode holistic --display --record output.mp4 --record-fps 30
+
+# Take snapshots every 60 frames into ./snaps
+python3 main.py run --source 0 --mode hands --snapshot-dir ./snaps --snapshot-interval 60
+
+# Emit JSON Lines with per-frame summaries to stdout
+python3 main.py run --source 0 --mode hands --json - --json-landmarks --no-draw --quiet | head -n 5
+```
+
 ## Dependencies
 - `opencv-python-headless`: avoids GUI/GL dependencies for server/CI environments; use `--display` only if a GUI is available. If you need on-screen windows locally, you may switch to `opencv-python`.
 - `mediapipe` (optional): installed only on Python < 3.12 via environment marker. On Python 3.12/3.13, gesture commands will inform you that MediaPipe is unavailable.
